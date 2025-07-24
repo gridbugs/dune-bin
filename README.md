@@ -1,6 +1,15 @@
 # Dune Binary Distro
 
-Nix flake for building binary releases of the Dune build system.
+A stable binary release of the Dune build system.
+
+## Install Dune
+
+Paste this into your terminal to install Dune:
+```
+curl https://raw.githubusercontent.com/ocaml-dune/dune-bin/refs/heads/main/install.sh | sh -s 3.19.1
+```
+
+No installation of opam or OCaml is necessary. Dune will be installed under `~/.local` by default.
 
 ## Contents
 
