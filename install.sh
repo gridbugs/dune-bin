@@ -8,16 +8,16 @@ set -eu
 # at the end.
 main () {
     install_root="$HOME/.dune"
-    env_dir="$install_root/share/dune/env"
     bin_dir="${install_root}/bin"
 
     # Reset
     Color_Off='\033[0m' # Text Reset
 
     # Regular Colors
-    Red='\033[0;31m'   # Red
-    Green='\033[0;32m' # Green
-    White='\033[0;0m'  # White
+    Red='\033[0;31m'    # Red
+    Green='\033[0;32m'  # Green
+    Yellow='\033[0;33m' # Yellow
+    White='\033[0;0m'   # White
 
     # Bold
     Bold_Green='\033[1;32m' # Bold Green
@@ -26,6 +26,10 @@ main () {
     error() {
         printf "%berror%b: %s\n" "${Red}" "${Color_Off}" "$*" >&2
         exit 1
+    }
+
+    warn() {
+        printf "%bwarn%b: %s\n" "${Yellow}" "${Color_Off}" "$*" >&2
     }
 
     info() {
@@ -44,13 +48,75 @@ main () {
         printf "%b%s %b" "${Bold_Green}" "$*" "${Color_Off}"
     }
 
-
     command_exists() {
         command -v "$1" >/dev/null 2>&1
     }
 
     ensure_command() {
         command_exists "$1" || error "Failed to find \"$1\". This script needs \"$1\" to be able to install dune."
+    }
+
+    unsubst_home() {
+        echo "$1" | sed -e "s#^$HOME#\$HOME#"
+    }
+
+    remove_home() {
+        echo "$1" | sed -e "s#^$HOME/##" | sed -e 's#^/##'
+    }
+
+    tildify() {
+        case "$1" in
+        "$HOME"/*)
+            tilde_replacement=\~
+            echo "$1" | sed "s|$HOME|$tilde_replacement|g"
+            ;;
+        *)
+            echo "$1"
+            ;;
+        esac
+    }
+
+    get_current_dune_state() {
+        ensure_command "which"
+        which_dune=$(which dune || echo "none")
+        case "$which_dune" in
+            none)
+                echo none
+                ;;
+            $HOME/.opam/* | ~/.opam/*)
+                echo opam
+                ;;
+            $HOME/.local/bin/* | ~/.local/bin/*)
+                echo home_local
+                ;;
+            $HOME/.dune/bin/* | ~/.dune/bin/*)
+                echo home_dune
+                ;;
+            $HOME/* | ~/*)
+                echo home_other
+                ;;
+            *)
+                echo other
+                ;;
+        esac
+    }
+
+    opam_switch_before_dot_local_bin_in_path() {
+        # The most conventional place to install dune is ~/.local but if
+        # ~/.local/bin is already in the user's PATH variable and the current
+        # opam switch appears in PATH before ~/.local/bin then this will cause
+        # any dune managed by opam to take precedence over the dune installed
+        # by this script, which is likely not what the user intended when they
+        # ran this script. This function detects this case and returns 0 iff
+        # ~/.local/bin is already in PATH and is behind the current opam
+        # switch's bin directory.
+        echo "$PATH" |\
+            tr ':' '\n' |\
+            grep "\(\($HOME\|~\)/\.local/bin\)\|\(\($HOME\|~\)/\.opam\)" |\
+            sed 's#.*opam.*#opam#' |\
+            sed 's#.*local.*#local#' |\
+            paste -sd: - |\
+            grep '^\(opam\)\+:\(local\)' > /dev/null
     }
 
     if [ "$#" != "1" ]; then
@@ -75,12 +141,67 @@ main () {
     tar_uri="https://github.com/ocaml-dune/dune-bin/releases/download/$version/$tarball"
     # The tarball is expected to contain a single directory with this name:
     tarball_dir="dune-$version-$target"
-    tmp_dir="$(mktemp -d -t dune-install.XXXXXXXXXX)"
-    trap 'rm -rf "${tmp_dir}"' EXIT
 
     ensure_command "tar"
     ensure_command "gzip"
     ensure_command "curl"
+
+    echo
+    info_bold "Welcome to the Dune installer!"
+    echo
+    echo
+
+    install_root_local="$HOME/.local"
+    install_root_dune="$HOME/.dune"
+    if opam_switch_before_dot_local_bin_in_path; then
+        warn "Your current opam switch is earlier in your \$PATH than dune's recommended install location. This installer would normally recommend installing dune to $install_root_local however in your case this would cause the dune executable from your current opam switch to take precedent over the dune installed by this installer. This installer will proceed with an alternative default installation directory $install_root_dune which you are free to override."
+        echo
+        default_install_root="$install_root_dune"
+        install_root_local_message=""
+        install_root_dune_message=" (recommended)"
+    else
+        default_install_root="$install_root_local"
+        install_root_local_message=" (recommended)"
+        install_root_dune_message=""
+    fi
+
+    install_root=""
+    while [ -z "$install_root" ]; do
+        info "Where would you install dune? (enter index number or custom absolute path)"
+        echo
+        info "1) $install_root_local$install_root_local_message"
+        echo
+        info "2) $install_root_dune$install_root_dune_message"
+        echo
+        read -p "[$default_install_root] > " choice
+
+        case "$choice" in
+            "")
+                install_root=$default_install_root
+                ;;
+            1)
+                install_root=$install_root_local
+                ;;
+            2)
+                install_root=$install_root_dune
+                ;;
+            /*)
+                install_root=$choice
+                ;;
+            *)
+                echo
+                warn "Unrecognized choice: $choice"
+                echo
+                ;;
+        esac
+    done
+
+    echo
+    info "Dune will now be installed to $install_root"
+    echo
+
+    tmp_dir="$(mktemp -d -t dune-install.XXXXXXXX)"
+    trap 'rm -rf "${tmp_dir}"' EXIT
 
     # Determine whether we can use --no-same-owner to force tar to extract with user permissions.
     touch "${tmp_dir}/tar-detect"
@@ -105,149 +226,95 @@ main () {
         cp -r "$d" "$install_root"
     done
 
-    already_installed=false
+    echo
+    success "Dune successfully installed to $install_root!"
+    echo
+    echo
 
-    unsubst_home() {
-        echo "$1" | sed -e "s#^$HOME#\$HOME#"
-    }
-
-    remove_home() {
-        echo "$1" | sed -e "s#^$HOME/##" | sed -e 's#^/##'
-    }
-
-    tildify() {
-        case "$1" in
-        "$HOME"/*)
-            tilde_replacement=\~
-            echo "$1" | sed "s|$HOME|$tilde_replacement|g"
-            ;;
-        *)
-            echo "$1"
-            ;;
-        esac
-    }
-
-    case $(basename "${SHELL:-*}") in
-        fish)
-            env="${env_dir}/env.fish"
-            env_file=$(unsubst_home "${env}")
-
-            fish_config=$HOME/.config/fish/config.fish
-            tilde_fish_config=$(tildify "$fish_config")
-
-            # deliberately omit the home directory from the pattern so "~" and "$HOME" can be used interchangeably
-            if [ -f "$fish_config" ] && match=$(grep -n "$(remove_home "${env}")" "$fish_config"); then
-                echo "Shell configuration for dune appears to already exist in \"$fish_config\":"
-                echo "$match"
-                already_installed=true
-                refresh_command="source $tilde_fish_config"
-            elif [ -w "$fish_config" ]; then
-                printf "\n# dune\n%s\n%s\n" "source $env_file" "__dune_env $(unsubst_home "$install_root")" >> "$fish_config"
-
-                info "Added dune setup to \"$tilde_fish_config\""
-                echo
-
-                refresh_command="source $tilde_fish_config"
-            else
-                echo "To use dune you will need to source the file \"$env_file\""
-                echo
-            fi
-            ;;
-
-        zsh)
-            env="${env_dir}/env.zsh"
-            env_file=$(unsubst_home "${env}")
-
-            zsh_config=$HOME/.zshrc
-            tilde_zsh_config=$(tildify "$zsh_config")
-
-            # deliberately omit the home directory from the pattern so "~" and "$HOME" can be used interchangeably
-            if [ -f "$zsh_config" ] && match=$(grep -n "$(remove_home "${env}")" "$zsh_config"); then
-                echo "Shell configuration for dune appears to already exist in \"$zsh_config\":"
-                echo "$match"
-                already_installed=true
-                refresh_command="exec $SHELL"
-            elif [ -w "$zsh_config" ]; then
-                printf "\n# dune\n%s\n%s\n" "source $env_file" "__dune_env $(unsubst_home "$install_root")" >>"$zsh_config"
-
-                info "Added dune setup to \"$tilde_zsh_config\""
-                echo
-
-                refresh_command="exec $SHELL"
-            else
-                echo "To use dune you will need to source the file \"$env_file\""
-                echo
-            fi
-            ;;
-
+    shell=$(basename "${SHELL:-*}")
+    env_dir="$install_root/share/dune/env"
+    case "$shell" in
         bash)
-            env="${env_dir}/env.bash"
-            env_file=$(unsubst_home "${env}")
-
-            bash_configs="$HOME/.bashrc $HOME/.bash_profile"
-
-            if [ "${XDG_CONFIG_HOME:-}" ]; then
-                bash_configs="$bash_configs $XDG_CONFIG_HOME/.bash_profile $XDG_CONFIG_HOME/.bashrc $XDG_CONFIG_HOME/bash_profile $XDG_CONFIG_HOME/bashrc"
-            fi
-
-            for bash_config in $bash_configs; do
-                # deliberately omit the home directory from the pattern so "~" and "$HOME" can be used interchangeably
-                if [ -f "$bash_config" ] && match=$(grep -n "$(remove_home "${env}")" "$bash_config"); then
-                    echo "Shell configuration for dune appears to already exist in \"$bash_config\":"
-                    echo "$match"
-                    refresh_command="source $bash_config"
-                    already_installed=true
-                    break
-                fi
-            done
-
-            if [ "$already_installed" = false ]; then
-                set_manually=true
-                for bash_config in $bash_configs; do
-                    tilde_bash_config=$(tildify "$bash_config")
-
-                    if [ -w "$bash_config" ]; then
-                        printf "\n# dune\n%s\n%s\n" "source $env_file" "__dune_env $(unsubst_home "$install_root")" >>"$bash_config"
-
-                        info "Added dune setup to \"$tilde_bash_config\""
-                        echo
-
-                        refresh_command="source $bash_config"
-                        set_manually=false
-                        break
-                    fi
-                done
-
-                if [ $set_manually = true ]; then
-                    echo "To use dune you will need to source the file \"$env_file\""
-                    echo
-                fi
-            fi
+            env_file="$env_dir/env.bash"
+            shell_config="$HOME/.bashrc"
             ;;
-
+        zsh)
+            env_file="$env_dir/env.zsh"
+            shell_config="$HOME/.zshrc"
+            ;;
+        fish)
+            env_file="$env_dir/env.fish"
+            shell_config="$HOME/.config/fish/config.fish"
+            ;;
         *)
-            env="${env_dir}/env.bash"
-            env_file=$(unsubst_home "${env}")
-
-            echo "To use dune you will need to source the file \"$env_file\" (or similar as appropriate for your shell)"
-            info_bold "  export PATH=\"$bin_dir:\$PATH\""
+            info "The install script does not recognize your shell ($shell)."
             echo
+            info "It's up to you to ensure $install_root/bin is in your \$PATH variable."
+            echo
+            info "This installer will now exit."
+            echo
+            exit 0
             ;;
     esac
 
-    if [ "$already_installed" = false ]; then
+    dune_env_call="__dune_env $(unsubst_home $install_root)"
+    if [ -f "$shell_config" ] && match=$(grep -n "$(echo $dune_env_call | sed 's#\$#\\$#')" "$shell_config"); then
+        info "It appears your shell config file ($shell_config) is already set up correctly as it contains the line:"
         echo
-        info "To get started, run:"
+        info "$match"
         echo
-
-        if [ -n "${refresh_command+x}" ]; then
-            info_bold "  $refresh_command"
-            echo
-        fi
-
-        info_bold "  dune --help"
         echo
+        info "Just in case it isn't, here are the lines that need run when your shell starts to initialize dune:"
+        echo
+        echo
+        echo "source $(unsubst_home $env_file)"
+        echo "__dune_env $(unsubst_home $install_root)"
+        echo
+        info "This installer will now exit."
+        echo
+        exit 0
     fi
 
+    info "To run dune from your terminal, you'll need to add the following lines to your shell config file ($shell_config):"
+    echo
+    echo
+    echo "source $(unsubst_home $env_file)"
+    echo "__dune_env $(unsubst_home $install_root)"
+    echo
+
+    should_update_shell_config=""
+    while [ -z "$should_update_shell_config" ]; do
+        info "Would you like these lines to be appended to $shell_config? (y/n)"
+        read -p "[n] > " choice
+        case "$choice" in
+            "")
+                should_update_shell_config="n"
+                ;;
+            y|Y)
+                should_update_shell_config="y"
+                ;;
+            n|N)
+                should_update_shell_config="n"
+                ;;
+            *)
+                warn "Please enter y or n."
+                echo
+                ;;
+        esac
+    done
+
+    case "$should_update_shell_config" in
+        y)
+            printf "\n# From dune installer:\nsource $(unsubst_home $env_file)\n__dune_env $(unsubst_home $install_root)" >> "$shell_config"
+            echo
+            success "Add dune setup commands to $shell_config!"
+            echo
+            ;;
+        *)
+        ;;
+    esac
+
+    info "This installer will now exit."
+    echo
 }
 main "$@"
